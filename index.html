@@ -73,7 +73,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--font-ui);
 #ind-btn.active .car{transform:rotate(180deg)}
 #ind-panel{display:none;position:absolute;top:100%;right:8px;width:300px;max-width:calc(100vw - 16px);
   background:var(--bg2);border:1px solid var(--border2);border-radius:12px;z-index:120;
-  box-shadow:0 16px 50px rgba(0,0,0,.6);overflow:hidden;max-height:80vh;overflow-y:auto;
+  box-shadow:0 16px 50px rgba(0,0,0,.6);overflow:hidden;max-height:min(80vh,420px);overflow-y:auto;
   touch-action:pan-y;overscroll-behavior:contain}
 #ind-panel.open{display:block}
 .ind-section{padding:11px 13px;border-bottom:1px solid var(--border)}
@@ -183,6 +183,12 @@ body{background:var(--bg);color:var(--text);font-family:var(--font-ui);
 .asset-item .name{font-family:var(--font-mono);font-size:13px;font-weight:600}
 .asset-item .tag{font-size:10px;color:var(--muted);padding:2px 6px;border-radius:4px;background:var(--bg4)}
 .asset-left{display:flex;align-items:center;gap:10px}
+.asset-right{display:flex;flex-direction:column;align-items:flex-end;gap:2px}
+.asset-right .a-price{font-family:var(--font-mono);font-size:12px;color:var(--text);font-weight:600}
+.asset-right .a-change{font-family:var(--font-mono);font-size:11px;font-weight:700}
+.asset-right .a-change.up{color:var(--green)}
+.asset-right .a-change.down{color:var(--red)}
+.asset-right .a-change.neutral{color:var(--muted)}
 .fav-star{font-size:15px;line-height:1;color:var(--muted2);cursor:pointer;flex-shrink:0;
   user-select:none;transition:color .12s,transform .1s;padding:2px}
 .fav-star:hover{color:var(--yellow);transform:scale(1.2)}
@@ -374,6 +380,7 @@ const TF_MAP = {1:'1m',5:'5m',15:'15m',60:'1h',240:'4h',1440:'1d'};
 
 // ─── ESTADO ──────────────────────────────────────────────────────────────────
 let candles=[], asset='BTC', interval=15, allAssets=[];
+let assetMarketData={}; // { SYMBOL: {price, change} } — precio actual y variación 24h para la lista de activos
 let lwChart=null, candleSeries=null, volSeries=null;
 let userScrolled=false;
 let overlayDirty = true;
@@ -739,6 +746,29 @@ async function fetchMeta(){
   }
 }
 
+// ─── PRECIO ACTUAL + CAMBIO 24H PARA LA LISTA DE ACTIVOS ──────────────────────
+async function fetchAssetPrices(){
+  try{
+    const r=await fetch(API,{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({type:'metaAndAssetCtxs'})});
+    const d=await r.json();
+    const meta=d[0]?.universe||[];
+    const ctxs=d[1]||[];
+    const data={};
+    meta.forEach((m,i)=>{
+      const ctx=ctxs[i];
+      if(!ctx) return;
+      const price=parseFloat(ctx.markPx);
+      const prev=parseFloat(ctx.prevDayPx);
+      data[m.name]={
+        price: isNaN(price)?null:price,
+        change: (!isNaN(price)&&!isNaN(prev)&&prev)?(price-prev)/prev*100:null
+      };
+    });
+    assetMarketData=data;
+  }catch(e){}
+}
+
 // ─── FETCH ACTIVOS ────────────────────────────────────────────────────────────
 async function fetchAssets(){
   try{
@@ -752,6 +782,7 @@ async function fetchAssets(){
       'ATOM','LINK','UNI','APT','SUI','INJ','TIA','NEAR','SEI','STX','WIF',
       'BONK','JTO','PYTH','JUP','RNDR','FTM','AAVE','CRV','MKR','HYPE'];
   }
+  await fetchAssetPrices();
   renderAssetList('');
 }
 
@@ -1828,6 +1859,16 @@ function initIndPanelTouchScroll(){
   panel.addEventListener('touchcancel', ()=>{ mode=null; }, {passive:true});
 }
 
+function positionIndPanel(){
+  const panel=document.getElementById('ind-panel');
+  const topbar=document.getElementById('topbar');
+  if(!panel || !topbar) return;
+  const vh = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+  const topbarBottom = topbar.getBoundingClientRect().bottom;
+  const available = Math.max(160, vh - topbarBottom - 10);
+  panel.style.maxHeight = available + 'px';
+}
+
 // ─── UI: panel desplegable de indicadores ─────────────────────────────────────
 function initIndicatorsPanel(){
   const btn=document.getElementById('ind-btn');
@@ -1836,7 +1877,13 @@ function initIndicatorsPanel(){
     e.stopPropagation();
     const open=panel.classList.toggle('open');
     btn.classList.toggle('active', open);
+    if(open) positionIndPanel();
   });
+  window.addEventListener('resize', ()=>{ if(panel.classList.contains('open')) positionIndPanel(); });
+  if(window.visualViewport){
+    window.visualViewport.addEventListener('resize', ()=>{ if(panel.classList.contains('open')) positionIndPanel(); });
+  }
+  window.addEventListener('orientationchange', ()=>{ if(panel.classList.contains('open')) setTimeout(positionIndPanel, 150); });
   document.addEventListener('click', e=>{
     if(!panel.contains(e.target) && e.target!==btn){
       panel.classList.remove('open'); btn.classList.remove('active');
@@ -1908,7 +1955,16 @@ function renderAssetList(q){
     const div=document.createElement('div');
     div.className='asset-item';
     const isFav=favSet.has(a);
-    div.innerHTML=`<div class="asset-left"><span class="fav-star${isFav?' active':''}" data-a="${a}">${isFav?'★':'☆'}</span><span class="name">${a}-PERP</span></div><span class="tag">PERP</span>`;
+    const md=assetMarketData[a];
+    let rightHtml;
+    if(md && md.price!=null){
+      const chgCls = md.change==null ? 'neutral' : (md.change>=0?'up':'down');
+      const chgTxt = md.change==null ? '—' : (md.change>=0?'+':'')+md.change.toFixed(2)+'%';
+      rightHtml = `<div class="asset-right"><span class="a-price">${fmtPrice(md.price)}</span><span class="a-change ${chgCls}">${chgTxt}</span></div>`;
+    } else {
+      rightHtml = `<span class="tag">PERP</span>`;
+    }
+    div.innerHTML=`<div class="asset-left"><span class="fav-star${isFav?' active':''}" data-a="${a}">${isFav?'★':'☆'}</span><span class="name">${a}-PERP</span></div>${rightHtml}`;
     div.addEventListener('click',()=>selectAsset(a));
     div.querySelector('.fav-star').addEventListener('click', e=>{
       e.stopPropagation();
@@ -1948,6 +2004,7 @@ document.getElementById('asset-btn').addEventListener('click',()=>{
   document.getElementById('search-input').value='';
   renderAssetList('');
   setTimeout(()=>document.getElementById('search-input').focus(),50);
+  fetchAssetPrices().then(()=>renderAssetList(document.getElementById('search-input').value));
 });
 document.getElementById('search-input').addEventListener('input',e=>renderAssetList(e.target.value));
 document.getElementById('search-overlay').addEventListener('click',e=>{
@@ -2000,6 +2057,13 @@ const cacheHit = loadFromCache();
 fetchCandles({initial:!cacheHit});
 // Auto-refresh cada 15s preservando posición del usuario
 setInterval(()=>{ if(candles.length) fetchCandles(); }, 15000);
+setInterval(()=>{
+  fetchAssetPrices().then(()=>{
+    if(document.getElementById('search-overlay').classList.contains('open')){
+      renderAssetList(document.getElementById('search-input').value);
+    }
+  });
+}, 15000);
 </script>
 </body>
 </html>
